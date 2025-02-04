@@ -30,7 +30,7 @@ public class UploadService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        Log.d("UploadService", "UploadService je pokrenut.");
+        sendStatusUpdate("UploadService je pokrenut.");
         dbHelper = new UploadDatabaseHelper(getApplicationContext());
         new Thread(this::uploadImages).start();
         return START_STICKY;
@@ -42,23 +42,23 @@ public class UploadService extends Service {
             if (!dbHelper.isFileUploaded(file.getName())) {
                 sendImageToSMB(file);
             } else {
-                Log.d("UploadService", "File already uploaded, skipping: " + file.getName());
+                sendStatusUpdate("File already uploaded, skipping: " + file.getName());
             }
         }
     }
 
     private List<File> getAllImages() {
-        Log.d("UploadService", "Pokrenuto učitavanje slika...");
+        sendStatusUpdate("Pokrenuto učitavanje slika...");
 
         List<File> imageFiles = new ArrayList<>();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) { // Android 13+
             if (checkSelfPermission(android.Manifest.permission.READ_MEDIA_IMAGES) != PackageManager.PERMISSION_GRANTED) {
-                Log.e("UploadService", "Nemamo dozvolu za čitanje slika!");
+                sendStatusUpdate("Nemamo dozvolu za čitanje slika!");
                 return imageFiles;
             }
         } else { // Android 12 i niže
             if (checkSelfPermission(android.Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
-                Log.e("UploadService", "Nemamo dozvolu za čitanje slika!");
+                sendStatusUpdate("Nemamo dozvolu za čitanje slika!");
                 return imageFiles;
             }
         }
@@ -76,16 +76,16 @@ public class UploadService extends Service {
                 }
             }
         } catch (Exception e) {
-            Log.e("UploadService", "Error loading images", e);
+            sendStatusUpdate("Error loading images " + e);
         }
+        sendStatusUpdate("Završeno učitavanje slika, pronađeno: " + imageFiles.size() + " slika.");
 
-        Log.d("UploadService", "Završeno učitavanje slika, pronađeno: " + imageFiles.size() + " slika.");
 
         return imageFiles;
     }
 
     private void sendImageToSMB(File file) {
-        Log.d("UploadService", "Pokušavam da pošaljem: " + file.getName());
+        sendStatusUpdate("Pokušavam da pošaljem: " + file.getName());
         if (!file.exists()) {
             Log.e("UploadService", "FAJL NE POSTOJI: " + file.getAbsolutePath());
         }
@@ -103,6 +103,7 @@ public class UploadService extends Service {
             SmbFile smbFile = new SmbFile(smbPath, authContext);*/
 
             if (smbFile.exists()) {
+                sendStatusUpdate("File already exists on SMB, skipping: " + file.getName());
                 Log.d("UploadService", "File already exists on SMB, skipping: " + file.getName());
                 return;
             }
@@ -114,10 +115,12 @@ public class UploadService extends Service {
                     out.write(buffer, 0, bytesRead);
                 }
             }
+            sendStatusUpdate("File uploaded successfully: " + file.getName());
             Log.d("UploadService", "File uploaded successfully: " + file.getName());
             dbHelper.markFileAsUploaded(file.getName());
 
         } catch (IOException e) {
+            sendStatusUpdate("Error uploading file to SMB " + e);
             Log.e("UploadService", "Error uploading file to SMB", e);
         }
     }
@@ -125,5 +128,11 @@ public class UploadService extends Service {
     @Override
     public IBinder onBind(Intent intent) {
         return null;
+    }
+
+    private void sendStatusUpdate(String message) {
+        Intent intent = new Intent("UPLOAD_STATUS");
+        intent.putExtra("message", message);
+        sendBroadcast(intent);
     }
 }
