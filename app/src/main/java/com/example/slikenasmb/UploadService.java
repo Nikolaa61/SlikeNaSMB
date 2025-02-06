@@ -1,5 +1,9 @@
 package com.example.slikenasmb;
 
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -9,6 +13,12 @@ import android.os.Build;
 import android.os.IBinder;
 import android.provider.MediaStore;
 import android.util.Log;
+
+import androidx.core.app.ActivityCompat;
+import androidx.core.app.NotificationCompat;
+import androidx.core.content.ContextCompat;
+import androidx.localbroadcastmanager.content.LocalBroadcastManager;
+
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
@@ -22,29 +32,126 @@ import jcifs.smb.SmbFile;
 import jcifs.smb.SmbFileOutputStream;
 
 public class UploadService extends Service {
-    private static final String SMB_URL = "smb://192.168.1.99/Seagate_Expansion_1_d662/Slike sa telefona/";
-    private static final String USERNAME = "vodafone";
-    private static final String PASSWORD = "P6gJtZfH";
+    private static  String SMB_URL = "smb://192.168.1.99/Seagate_Expansion_1_d662/Slike sa telefona/";
+    private static  String USERNAME = "vodafone";
+    private static  String PASSWORD = "P6gJtZfH";
+
+    private NotificationManager notificationManager;
+    private NotificationCompat.Builder notificationBuilder;
+
+    private static final int NOTIFICATION_ID = 1;
+    private static final String CHANNEL_ID = "UploadServiceChannel";
 
     private UploadDatabaseHelper dbHelper;
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        if (intent != null && "STOP_SERVICE".equals(intent.getAction())) {
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+        initNotification(); // Pokreni notifikaciju u foreground modu
+//        startForegroundService();
+
+        SMB_URL = intent.getStringExtra("SMB_URL");
+        USERNAME = intent.getStringExtra("USERNAME");
+        PASSWORD = intent.getStringExtra("PASSWORD");
+
         sendStatusUpdate("UploadService je pokrenut.");
         dbHelper = new UploadDatabaseHelper(getApplicationContext());
         new Thread(this::uploadImages).start();
         return START_STICKY;
     }
 
+    private void initNotification() {
+        notificationManager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationChannel channel = new NotificationChannel(
+                    CHANNEL_ID,
+                    "Upload Service",
+                    NotificationManager.IMPORTANCE_LOW
+            );
+            notificationManager.createNotificationChannel(channel);
+        }
+
+        // Kreiraj Intent za prekid servisa
+        Intent stopIntent = new Intent(this, StopServiceReceiver.class);
+        stopIntent.setAction("STOP_SERVICE");  // Dodajemo eksplicitnu akciju
+        PendingIntent stopPendingIntent = PendingIntent.getBroadcast(
+                this, 0, stopIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+        );
+
+        notificationBuilder = new NotificationCompat.Builder(this, CHANNEL_ID)
+                .setContentTitle("Upload u toku")
+                .setContentText("Priprema fajlova za slanje...")
+                .setSmallIcon(R.drawable.ic_upload2)
+                .setOngoing(true)
+                .setProgress(100, 0, true) // Progress bar bez definisanog napretka
+                .addAction(R.drawable.x, "Zaustavi", stopPendingIntent); // Dugme za prekid
+
+
+        startForeground(NOTIFICATION_ID, notificationBuilder.build());
+    }
+
+    private void updateNotification(int progress, int totalFiles) {
+        notificationBuilder
+                .setContentText("Prebacivanje fajlova: " + progress + "/" + totalFiles)
+                .setProgress(totalFiles, progress, false);
+
+        notificationManager.notify(NOTIFICATION_ID, notificationBuilder.build());
+    }
+
+    private void startForegroundService() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationChannel channel = new NotificationChannel(
+                    CHANNEL_ID,
+                    "Upload Service",
+                    NotificationManager.IMPORTANCE_LOW
+            );
+            NotificationManager manager = getSystemService(NotificationManager.class);
+            if (manager != null) {
+                manager.createNotificationChannel(channel);
+            }
+        }
+
+        Notification notification = new NotificationCompat.Builder(this, CHANNEL_ID)
+                .setContentTitle("Upload u toku")
+                .setContentText("Aplikacija prebacuje fajlove na server...")
+                .setSmallIcon(R.drawable.ic_upload2) // Dodaj ikonicu u res/drawable/ic_upload.png
+                .build();
+
+        startForeground(NOTIFICATION_ID, notification);
+    }
+
+    private void completeNotification() {
+        notificationBuilder
+                .setContentText("Upload završen")
+                .setProgress(0, 0, false)
+                .setOngoing(false);
+
+        notificationManager.notify(NOTIFICATION_ID, notificationBuilder.build());
+    }
+
     private void uploadImages() {
         List<File> images = getAllImages();
+        int totalFiles = images.size();
+        int uploadedFiles = 0;
+
         for (File file : images) {
             if (!dbHelper.isFileUploaded(file.getName())) {
                 sendImageToSMB(file);
+                uploadedFiles++;
+                updateNotification(uploadedFiles, totalFiles); // Ažuriraj napredak
             } else {
+                uploadedFiles++;
                 sendStatusUpdate("File already uploaded, skipping: " + file.getName());
             }
         }
+
+        sendStatusUpdate("Zavrsen upload slika");
+        completeNotification(); // Završna notifikacija
+        stopSelf();
     }
 
     private List<File> getAllImages() {
@@ -52,8 +159,9 @@ public class UploadService extends Service {
 
         List<File> imageFiles = new ArrayList<>();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) { // Android 13+
-            if (checkSelfPermission(android.Manifest.permission.READ_MEDIA_IMAGES) != PackageManager.PERMISSION_GRANTED) {
-                sendStatusUpdate("Nemamo dozvolu za čitanje slika!");
+            if (checkSelfPermission(android.Manifest.permission.READ_MEDIA_IMAGES) != PackageManager.PERMISSION_GRANTED ||
+                    checkSelfPermission(android.Manifest.permission.READ_MEDIA_VIDEO) != PackageManager.PERMISSION_GRANTED) {
+                sendStatusUpdate("Nemamo dozvolu za čitanje slika i videa!");
                 return imageFiles;
             }
         } else { // Android 12 i niže
@@ -62,15 +170,24 @@ public class UploadService extends Service {
                 return imageFiles;
             }
         }
-        Uri uri = MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
-        String[] projection = {MediaStore.Images.Media.DATA};
-        try (Cursor cursor = getContentResolver().query(uri, projection, null, null, null)) {
+        Uri uri = MediaStore.Files.getContentUri("external");
+
+        String[] projection = {MediaStore.MediaColumns.DATA, MediaStore.MediaColumns.MIME_TYPE};
+
+        // Filtriramo samo slike i video fajlove
+        String selection = MediaStore.Files.FileColumns.MEDIA_TYPE + "=? OR " +
+                MediaStore.Files.FileColumns.MEDIA_TYPE + "=?";
+        String[] selectionArgs = {
+                String.valueOf(MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE),
+                String.valueOf(MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO)
+        };
+        try (Cursor cursor = getContentResolver().query(uri, projection, selection, selectionArgs, null)) {
             if (cursor != null) {
                 while (cursor.moveToNext()) {
-                    String imagePath = cursor.getString(cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATA));
-                    File file = new File(imagePath);
+                    String filePath = cursor.getString(cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATA));
+                    File file = new File(filePath);
                     if (file.exists()) {
-                        Log.d("UploadService", "Pronađena slika: " + imagePath);
+                        Log.d("UploadSe  rvice", "Pronađena slika: " + filePath);
                         imageFiles.add(file);
                     }
                 }
@@ -133,6 +250,17 @@ public class UploadService extends Service {
     private void sendStatusUpdate(String message) {
         Intent intent = new Intent("UPLOAD_STATUS");
         intent.putExtra("message", message);
-        sendBroadcast(intent);
+        LocalBroadcastManager.getInstance(this).sendBroadcast(intent);
+        Log.d("UploadService", "Status update sent: " + message);
+    }
+
+    @Override
+    public void onDestroy() {
+        super.onDestroy();
+        stopForeground(true);
+        if (notificationManager == null) {
+            notificationManager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+        }
+        sendStatusUpdate("Upload servis zaustavljen.");
     }
 }
